@@ -9,25 +9,61 @@ from typing import Optional
 class EventView(discord.ui.View):
     """Кнопки и меню для управления мероприятием"""
     
-    def __init__(self, event_id: int):
+    def __init__(self, event_id: int, bot=None):
         super().__init__(timeout=None)
         self.event_id = event_id
+        self.bot = bot
+        
+        # Создаём кнопки с уникальными custom_id
+        self.add_item(JoinMainButton(event_id))
+        self.add_item(JoinReserveButton(event_id))
+        self.add_item(CancelButton(event_id))
+        self.add_item(ManageMenu(event_id))
+
+class JoinMainButton(discord.ui.Button):
+    """Кнопка записи в основной состав"""
     
-    @discord.ui.button(label="✅ Записаться в основной состав", style=discord.ButtonStyle.green, custom_id="join_main")
-    async def join_main(self, interaction: discord.Interaction, button: discord.ui.Button):
-        """Записаться в основной состав"""
-        result = await self.register_user(interaction, "main")
+    def __init__(self, event_id: int):
+        super().__init__(
+            label="✅ Записаться в основной состав",
+            style=discord.ButtonStyle.green,
+            custom_id=f"join_main_{event_id}"
+        )
+        self.event_id = event_id
+    
+    async def callback(self, interaction: discord.Interaction):
+        result = await register_user(interaction, self.event_id, "main")
         await interaction.response.send_message(result, ephemeral=True)
+        await update_event_message(interaction.message, self.event_id)
+
+class JoinReserveButton(discord.ui.Button):
+    """Кнопка записи в запасной состав"""
     
-    @discord.ui.button(label="📋 Записаться в запасной состав", style=discord.ButtonStyle.gray, custom_id="join_reserve")
-    async def join_reserve(self, interaction: discord.Interaction, button: discord.ui.Button):
-        """Записаться в запасной состав"""
-        result = await self.register_user(interaction, "reserve")
+    def __init__(self, event_id: int):
+        super().__init__(
+            label="📋 Записаться в запасной состав",
+            style=discord.ButtonStyle.gray,
+            custom_id=f"join_reserve_{event_id}"
+        )
+        self.event_id = event_id
+    
+    async def callback(self, interaction: discord.Interaction):
+        result = await register_user(interaction, self.event_id, "reserve")
         await interaction.response.send_message(result, ephemeral=True)
+        await update_event_message(interaction.message, self.event_id)
+
+class CancelButton(discord.ui.Button):
+    """Кнопка отмены регистрации"""
     
-    @discord.ui.button(label="❌ Отменить запись", style=discord.ButtonStyle.red, custom_id="cancel_registration")
-    async def cancel_registration(self, interaction: discord.Interaction, button: discord.ui.Button):
-        """Отменить свою регистрацию"""
+    def __init__(self, event_id: int):
+        super().__init__(
+            label="❌ Отменить запись",
+            style=discord.ButtonStyle.red,
+            custom_id=f"cancel_reg_{event_id}"
+        )
+        self.event_id = event_id
+    
+    async def callback(self, interaction: discord.Interaction):
         async with aiosqlite.connect(DATABASE_PATH) as db:
             await db.execute(
                 'DELETE FROM event_participants WHERE event_id = ? AND user_id = ?',
@@ -35,29 +71,35 @@ class EventView(discord.ui.View):
             )
             await db.commit()
         
-        await self.update_event_message(interaction.message)
+        await update_event_message(interaction.message, self.event_id)
         await interaction.response.send_message("✅ Вы отменили запись на мероприятие", ephemeral=True)
+
+class ManageMenu(discord.ui.Select):
+    """Меню управления мероприятием"""
     
-    @discord.ui.select(
-        placeholder="Взаимодействие со списками",
-        options=[
+    def __init__(self, event_id: int):
+        options = [
             discord.SelectOption(label="Тег основного состава", description="Упомянуть всех из основного состава", value="tag_main", emoji="📢"),
             discord.SelectOption(label="Тег запасного состава", description="Упомянуть всех из запасного состава", value="tag_reserve", emoji="📢"),
             discord.SelectOption(label="Завершить мероприятие", description="Закрыть регистрацию и архивировать", value="finish", emoji="✅"),
             discord.SelectOption(label="Отменить мероприятие", description="Отменить и удалить мероприятие", value="cancel", emoji="🗑️"),
         ]
-    )
-    async def manage_menu(self, interaction: discord.Interaction, select: discord.ui.Select):
-        """Меню управления мероприятием"""
-        
-        # Проверка прав (только создатель или администратор)
+        super().__init__(
+            placeholder="Взаимодействие со списками",
+            options=options,
+            custom_id=f"manage_{event_id}"
+        )
+        self.event_id = event_id
+    
+    async def callback(self, interaction: discord.Interaction):
+        # Проверка прав
         async with aiosqlite.connect(DATABASE_PATH) as db:
             cursor = await db.execute(
                 'SELECT creator_id FROM events WHERE id = ?',
                 (self.event_id,)
             )
             result = await cursor.fetchone()
-            
+        
         if not result:
             await interaction.response.send_message("❌ Мероприятие не найдено!", ephemeral=True)
             return
@@ -71,208 +113,211 @@ class EventView(discord.ui.View):
             )
             return
         
-        choice = select.values[0]
+        choice = self.values[0]
         
         if choice == "tag_main":
-            await self.tag_participants(interaction, "main")
+            await tag_participants(interaction, self.event_id, "main")
         elif choice == "tag_reserve":
-            await self.tag_participants(interaction, "reserve")
+            await tag_participants(interaction, self.event_id, "reserve")
         elif choice == "finish":
-            await self.finish_event(interaction)
+            await finish_event(interaction, self.event_id)
         elif choice == "cancel":
-            await self.cancel_event(interaction)
-    
-    async def register_user(self, interaction: discord.Interaction, roster_type: str):
-        """Зарегистрировать пользователя на мероприятие"""
-        async with aiosqlite.connect(DATABASE_PATH) as db:
-            # Получаем информацию о мероприятии
-            cursor = await db.execute(
-                'SELECT max_participants, current_participants FROM events WHERE id = ?',
-                (self.event_id,)
-            )
-            event_info = await cursor.fetchone()
+            await cancel_event(interaction, self.event_id)
+
+# Вспомогательные функции
+
+async def register_user(interaction: discord.Interaction, event_id: int, roster_type: str):
+    """Зарегистрировать пользователя на мероприятие"""
+    async with aiosqlite.connect(DATABASE_PATH) as db:
+        # Получаем информацию о мероприятии
+        cursor = await db.execute(
+            'SELECT max_participants, current_participants FROM events WHERE id = ?',
+            (event_id,)
+        )
+        event_info = await cursor.fetchone()
+        
+        if not event_info:
+            return "❌ Мероприятие не найдено!"
+        
+        max_participants, current_participants = event_info
+        
+        # Проверяем, не записан ли уже
+        cursor = await db.execute(
+            'SELECT roster_type FROM event_participants WHERE event_id = ? AND user_id = ?',
+            (event_id, interaction.user.id)
+        )
+        existing = await cursor.fetchone()
+        
+        if existing:
+            old_type = existing[0]
+            if old_type == roster_type:
+                return f"⚠️ Вы уже записаны в {'основной' if roster_type == 'main' else 'запасной'} состав!"
             
-            if not event_info:
-                return "❌ Мероприятие не найдено!"
-            
-            max_participants, current_participants = event_info
-            
-            # Проверяем, не записан ли уже
-            cursor = await db.execute(
-                'SELECT roster_type FROM event_participants WHERE event_id = ? AND user_id = ?',
-                (self.event_id, interaction.user.id)
-            )
-            existing = await cursor.fetchone()
-            
-            if existing:
-                old_type = existing[0]
-                if old_type == roster_type:
-                    return f"⚠️ Вы уже записаны в {'основной' if roster_type == 'main' else 'запасной'} состав!"
-                
-                # Переместить из одного списка в другой
-                await db.execute(
-                    'UPDATE event_participants SET roster_type = ? WHERE event_id = ? AND user_id = ?',
-                    (roster_type, self.event_id, interaction.user.id)
-                )
-                await db.commit()
-                await self.update_event_message(interaction.message)
-                return f"✅ Вы перемещены в {'основной' if roster_type == 'main' else 'запасной'} состав!"
-            
-            # Проверяем лимит для основного состава
-            if roster_type == "main" and current_participants >= max_participants:
-                return f"❌ Основной состав полон ({max_participants}/{max_participants})! Запишитесь в запасной."
-            
-            # Регистрируем
+            # Переместить из одного списка в другой
             await db.execute(
-                'INSERT INTO event_participants (event_id, user_id, roster_type, joined_at) VALUES (?, ?, ?, ?)',
-                (self.event_id, interaction.user.id, roster_type, datetime.now().isoformat())
+                'UPDATE event_participants SET roster_type = ? WHERE event_id = ? AND user_id = ?',
+                (roster_type, event_id, interaction.user.id)
             )
-            
-            # Обновляем счётчик участников
-            if roster_type == "main":
-                await db.execute(
-                    'UPDATE events SET current_participants = current_participants + 1 WHERE id = ?',
-                    (self.event_id,)
-                )
-            
             await db.commit()
+            return f"✅ Вы перемещены в {'основной' if roster_type == 'main' else 'запасной'} состав!"
         
-        await self.update_event_message(interaction.message)
-        return f"✅ Вы записаны в {'основной' if roster_type == 'main' else 'запасной'} состав!"
+        # Проверяем лимит для основного состава
+        if roster_type == "main" and current_participants >= max_participants:
+            return f"❌ Основной состав полон ({max_participants}/{max_participants})! Запишитесь в запасной."
+        
+        # Регистрируем
+        await db.execute(
+            'INSERT INTO event_participants (event_id, user_id, roster_type, joined_at) VALUES (?, ?, ?, ?)',
+            (event_id, interaction.user.id, roster_type, datetime.now().isoformat())
+        )
+        
+        # Обновляем счётчик участников
+        if roster_type == "main":
+            await db.execute(
+                'UPDATE events SET current_participants = current_participants + 1 WHERE id = ?',
+                (event_id,)
+            )
+        
+        await db.commit()
     
-    async def update_event_message(self, message: discord.Message):
-        """Обновить сообщение с мероприятием"""
-        async with aiosqlite.connect(DATABASE_PATH) as db:
-            # Получаем информацию о мероприятии
-            cursor = await db.execute(
-                'SELECT * FROM events WHERE id = ?',
-                (self.event_id,)
-            )
-            event = await cursor.fetchone()
-            
-            # Получаем участников
-            cursor = await db.execute(
-                'SELECT user_id, roster_type FROM event_participants WHERE event_id = ? ORDER BY joined_at',
-                (self.event_id,)
-            )
-            participants = await cursor.fetchall()
-        
-        if not event:
-            return
-        
-        # Распаковываем данные мероприятия
-        event_id, guild_id, creator_id, title, server, color, map_name, time, max_participants, current_participants, priority_roles, created_at = event
-        
-        # Создаём embed
-        embed = discord.Embed(
-            title=f"📋 Регистрация на мероприятие",
-            color=discord.Color.from_str(color) if color else discord.Color.blue()
+    return f"✅ Вы записаны в {'основной' if roster_type == 'main' else 'запасной'} состав!"
+
+async def update_event_message(message: discord.Message, event_id: int):
+    """Обновить сообщение с мероприятием"""
+    async with aiosqlite.connect(DATABASE_PATH) as db:
+        # Получаем информацию о мероприятии
+        cursor = await db.execute(
+            'SELECT * FROM events WHERE id = ?',
+            (event_id,)
         )
+        event = await cursor.fetchone()
         
-        # Информация о мероприятии
-        info = f"**• Название:** {title}\n"
-        info += f"**• Сервер:** {server}\n"
-        info += f"**• Лимит участников:** {max_participants}\n"
-        if color:
-            info += f"**• Цвет:** {color}\n"
-        if map_name:
-            info += f"**• Карта:** {map_name}\n"
-        
-        creator = message.guild.get_member(creator_id)
-        info += f"**• Создатель:** {creator.mention if creator else 'Неизвестен'}\n"
-        
-        if priority_roles:
-            info += f"**• Приоритетные роли:** {priority_roles}\n"
-        
-        info += f"**• Время:** {time}\n"
-        info += f"**• ID мероприятия:** {event_id}\n"
-        
-        embed.add_field(name="ℹ️ Информация", value=info, inline=False)
-        
-        # Основной состав
-        main_roster = [p for p in participants if p[1] == "main"]
-        main_list = ""
-        for i, (user_id, _) in enumerate(main_roster, 1):
-            member = message.guild.get_member(user_id)
-            main_list += f"{i}. {member.mention if member else f'ID:{user_id}'}\n"
-        
-        if not main_list:
-            main_list = "*Пусто*"
-        
-        embed.add_field(
-            name=f"👥 Основной состав | {len(main_roster)}/{max_participants} человек",
-            value=main_list,
-            inline=False
+        # Получаем участников
+        cursor = await db.execute(
+            'SELECT user_id, roster_type FROM event_participants WHERE event_id = ? ORDER BY joined_at',
+            (event_id,)
         )
-        
-        # Запасной состав
-        reserve_roster = [p for p in participants if p[1] == "reserve"]
-        reserve_list = ""
-        for i, (user_id, _) in enumerate(reserve_roster, 1):
-            member = message.guild.get_member(user_id)
-            reserve_list += f"{i}. {member.mention if member else f'ID:{user_id}'}\n"
-        
-        if not reserve_list:
-            reserve_list = "*Пусто*"
-        
-        embed.add_field(
-            name=f"📋 Запасной состав | {len(reserve_roster)} человек",
-            value=reserve_list,
-            inline=False
-        )
-        
-        embed.set_footer(text=f"Создано: {created_at[:16]}")
-        
-        await message.edit(embed=embed, view=self)
+        participants = await cursor.fetchall()
     
-    async def tag_participants(self, interaction: discord.Interaction, roster_type: str):
-        """Упомянуть всех участников"""
-        async with aiosqlite.connect(DATABASE_PATH) as db:
-            cursor = await db.execute(
-                'SELECT user_id FROM event_participants WHERE event_id = ? AND roster_type = ?',
-                (self.event_id, roster_type)
-            )
-            participants = await cursor.fetchall()
-        
-        if not participants:
-            await interaction.response.send_message(
-                f"❌ {'Основной' if roster_type == 'main' else 'Запасной'} состав пуст!",
-                ephemeral=True
-            )
-            return
-        
-        mentions = " ".join([f"<@{p[0]}>" for p in participants])
-        roster_name = "основного" if roster_type == "main" else "запасного"
-        
+    if not event:
+        return
+    
+    # Распаковываем данные мероприятия
+    event_id, guild_id, creator_id, title, server, color, map_name, time, max_participants, current_participants, priority_roles, created_at, status = event
+    
+    # Создаём embed
+    embed = discord.Embed(
+        title=f"📋 Регистрация на мероприятие",
+        color=discord.Color.from_str(color) if color else discord.Color.blue()
+    )
+    
+    # Информация о мероприятии
+    info = f"**• Название:** {title}\n"
+    info += f"**• Сервер:** {server}\n"
+    info += f"**• Лимит участников:** {max_participants}\n"
+    if color:
+        info += f"**• Цвет:** {color}\n"
+    if map_name:
+        info += f"**• Карта:** {map_name}\n"
+    
+    creator = message.guild.get_member(creator_id)
+    info += f"**• Создатель:** {creator.mention if creator else 'Неизвестен'}\n"
+    
+    if priority_roles:
+        info += f"**• Приоритетные роли:** {priority_roles}\n"
+    
+    info += f"**• Время:** {time}\n"
+    info += f"**• ID мероприятия:** {event_id}\n"
+    
+    embed.add_field(name="ℹ️ Информация", value=info, inline=False)
+    
+    # Основной состав
+    main_roster = [p for p in participants if p[1] == "main"]
+    main_list = ""
+    for i, (user_id, _) in enumerate(main_roster, 1):
+        member = message.guild.get_member(user_id)
+        main_list += f"{i}. {member.mention if member else f'ID:{user_id}'}\n"
+    
+    if not main_list:
+        main_list = "*Пусто*"
+    
+    embed.add_field(
+        name=f"👥 Основной состав | {len(main_roster)}/{max_participants} человек",
+        value=main_list,
+        inline=False
+    )
+    
+    # Запасной состав
+    reserve_roster = [p for p in participants if p[1] == "reserve"]
+    reserve_list = ""
+    for i, (user_id, _) in enumerate(reserve_roster, 1):
+        member = message.guild.get_member(user_id)
+        reserve_list += f"{i}. {member.mention if member else f'ID:{user_id}'}\n"
+    
+    if not reserve_list:
+        reserve_list = "*Пусто*"
+    
+    embed.add_field(
+        name=f"📋 Запасной состав | {len(reserve_roster)} человек",
+        value=reserve_list,
+        inline=False
+    )
+    
+    embed.set_footer(text=f"Создано: {created_at[:16]}")
+    
+    # Создаём view с правильным event_id
+    view = EventView(event_id)
+    
+    await message.edit(embed=embed, view=view)
+
+async def tag_participants(interaction: discord.Interaction, event_id: int, roster_type: str):
+    """Упомянуть всех участников"""
+    async with aiosqlite.connect(DATABASE_PATH) as db:
+        cursor = await db.execute(
+            'SELECT user_id FROM event_participants WHERE event_id = ? AND roster_type = ?',
+            (event_id, roster_type)
+        )
+        participants = await cursor.fetchall()
+    
+    if not participants:
         await interaction.response.send_message(
-            f"📢 **Участники {roster_name} состава:**\n{mentions}"
+            f"❌ {'Основной' if roster_type == 'main' else 'Запасной'} состав пуст!",
+            ephemeral=True
         )
+        return
     
-    async def finish_event(self, interaction: discord.Interaction):
-        """Завершить мероприятие"""
-        async with aiosqlite.connect(DATABASE_PATH) as db:
-            await db.execute(
-                'UPDATE events SET status = ? WHERE id = ?',
-                ("finished", self.event_id)
-            )
-            await db.commit()
-        
-        embed = interaction.message.embeds[0]
-        embed.title = "✅ Мероприятие завершено"
-        embed.color = discord.Color.green()
-        
-        await interaction.message.edit(embed=embed, view=None)
-        await interaction.response.send_message("✅ Мероприятие завершено!", ephemeral=True)
+    mentions = " ".join([f"<@{p[0]}>" for p in participants])
+    roster_name = "основного" if roster_type == "main" else "запасного"
     
-    async def cancel_event(self, interaction: discord.Interaction):
-        """Отменить мероприятие"""
-        async with aiosqlite.connect(DATABASE_PATH) as db:
-            await db.execute('DELETE FROM event_participants WHERE event_id = ?', (self.event_id,))
-            await db.execute('DELETE FROM events WHERE id = ?', (self.event_id,))
-            await db.commit()
-        
-        await interaction.message.delete()
-        await interaction.response.send_message("🗑️ Мероприятие отменено и удалено!", ephemeral=True)
+    await interaction.response.send_message(
+        f"📢 **Участники {roster_name} состава:**\n{mentions}"
+    )
+
+async def finish_event(interaction: discord.Interaction, event_id: int):
+    """Завершить мероприятие"""
+    async with aiosqlite.connect(DATABASE_PATH) as db:
+        await db.execute(
+            'UPDATE events SET status = ? WHERE id = ?',
+            ("finished", event_id)
+        )
+        await db.commit()
+    
+    embed = interaction.message.embeds[0]
+    embed.title = "✅ Мероприятие завершено"
+    embed.color = discord.Color.green()
+    
+    await interaction.message.edit(embed=embed, view=None)
+    await interaction.response.send_message("✅ Мероприятие завершено!", ephemeral=True)
+
+async def cancel_event(interaction: discord.Interaction, event_id: int):
+    """Отменить мероприятие"""
+    async with aiosqlite.connect(DATABASE_PATH) as db:
+        await db.execute('DELETE FROM event_participants WHERE event_id = ?', (event_id,))
+        await db.execute('DELETE FROM events WHERE id = ?', (event_id,))
+        await db.commit()
+    
+    await interaction.message.delete()
+    await interaction.response.send_message("🗑️ Мероприятие отменено и удалено!", ephemeral=True)
 
 
 class Events(commands.Cog):
@@ -285,6 +330,21 @@ class Events(commands.Cog):
     async def on_ready(self):
         """Инициализация таблиц при запуске"""
         await self.init_db()
+        
+        # Регистрируем persistent views для существующих мероприятий
+        async with aiosqlite.connect(DATABASE_PATH) as db:
+            cursor = await db.execute(
+                'SELECT id FROM events WHERE status = ?',
+                ('active',)
+            )
+            events = await cursor.fetchall()
+        
+        # Добавляем view для каждого активного мероприятия
+        for (event_id,) in events:
+            view = EventView(event_id, self.bot)
+            self.bot.add_view(view)
+        
+        print(f"✅ Зарегистрировано {len(events)} активных мероприятий")
     
     async def init_db(self):
         """Создать таблицы для мероприятий"""
@@ -346,11 +406,6 @@ class Events(commands.Cog):
     ):
         """Создать новое мероприятие"""
         
-        # Проверка прав
-        if not interaction.user.guild_permissions.manage_events:
-            # Можно добавить проверку на определенную роль
-            pass
-        
         # Сохраняем в БД
         async with aiosqlite.connect(DATABASE_PATH) as db:
             cursor = await db.execute('''
@@ -410,7 +465,10 @@ class Events(commands.Cog):
         embed.set_footer(text=f"Создано: {datetime.now().strftime('%d.%m.%Y %H:%M')}")
         
         # Создаём view с кнопками
-        view = EventView(event_id)
+        view = EventView(event_id, self.bot)
+        
+        # Регистрируем view в боте для persistent storage
+        self.bot.add_view(view)
         
         await interaction.response.send_message(embed=embed, view=view)
     
