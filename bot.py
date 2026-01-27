@@ -55,7 +55,8 @@ async def load_extensions():
         'cogs.reports',
         'cogs.warns',
         'cogs.members',
-        'cogs.utils'
+        'cogs.utils',
+        'events.py'
     ]
     
     for extension in extensions:
