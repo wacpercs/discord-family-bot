@@ -34,6 +34,12 @@ class JoinMainButton(discord.ui.Button):
     async def callback(self, interaction: discord.Interaction):
         result = await register_user(interaction, self.event_id, "main")
         await interaction.response.send_message(result, ephemeral=True)
+        
+        # Логируем действие
+        if "записаны" in result or "перемещены" in result:
+            log_text = f"✅ {interaction.user.mention} записался в **основной состав**"
+            await log_to_thread(interaction.message, self.event_id, log_text)
+        
         await update_event_message(interaction.message, self.event_id)
 
 class JoinReserveButton(discord.ui.Button):
@@ -50,6 +56,12 @@ class JoinReserveButton(discord.ui.Button):
     async def callback(self, interaction: discord.Interaction):
         result = await register_user(interaction, self.event_id, "reserve")
         await interaction.response.send_message(result, ephemeral=True)
+        
+        # Логируем действие
+        if "записаны" in result or "перемещены" in result:
+            log_text = f"📋 {interaction.user.mention} записался в **запасной состав**"
+            await log_to_thread(interaction.message, self.event_id, log_text)
+        
         await update_event_message(interaction.message, self.event_id)
 
 class CancelButton(discord.ui.Button):
@@ -65,11 +77,25 @@ class CancelButton(discord.ui.Button):
     
     async def callback(self, interaction: discord.Interaction):
         async with aiosqlite.connect(DATABASE_PATH) as db:
+            # Проверяем в каком составе был пользователь
+            cursor = await db.execute(
+                'SELECT roster_type FROM event_participants WHERE event_id = ? AND user_id = ?',
+                (self.event_id, interaction.user.id)
+            )
+            result = await cursor.fetchone()
+            roster_type = result[0] if result else None
+            
             await db.execute(
                 'DELETE FROM event_participants WHERE event_id = ? AND user_id = ?',
                 (self.event_id, interaction.user.id)
             )
             await db.commit()
+        
+        # Логируем действие
+        if roster_type:
+            roster_name = "основного" if roster_type == "main" else "запасного"
+            log_text = f"❌ {interaction.user.mention} отменил запись из **{roster_name} состава**"
+            await log_to_thread(interaction.message, self.event_id, log_text)
         
         await update_event_message(interaction.message, self.event_id)
         await interaction.response.send_message("✅ Вы отменили запись на мероприятие", ephemeral=True)
@@ -125,6 +151,30 @@ class ManageMenu(discord.ui.Select):
             await cancel_event(interaction, self.event_id)
 
 # Вспомогательные функции
+
+async def log_to_thread(message: discord.Message, event_id: int, log_text: str):
+    """Логировать действие в ветку мероприятия"""
+    async with aiosqlite.connect(DATABASE_PATH) as db:
+        cursor = await db.execute(
+            'SELECT thread_id FROM events WHERE id = ?',
+            (event_id,)
+        )
+        result = await cursor.fetchone()
+    
+    if result and result[0]:
+        thread_id = result[0]
+        try:
+            thread = message.guild.get_thread(thread_id)
+            if not thread:
+                # Пытаемся получить thread из канала
+                thread = await message.channel.fetch_thread(thread_id)
+            
+            if thread:
+                # Добавляем метку времени
+                timestamp = datetime.now().strftime("%d.%m.%Y %H:%M:%S")
+                await thread.send(f"`[{timestamp}]` {log_text}")
+        except:
+            pass  # Ветка может быть удалена или недоступна
 
 async def register_user(interaction: discord.Interaction, event_id: int, roster_type: str):
     """Зарегистрировать пользователя на мероприятие"""
@@ -292,6 +342,10 @@ async def tag_participants(interaction: discord.Interaction, event_id: int, rost
     await interaction.response.send_message(
         f"📢 **Участники {roster_name} состава:**\n{mentions}"
     )
+    
+    # Логируем действие
+    log_text = f"📢 {interaction.user.mention} упомянул участников **{roster_name} состава** ({len(participants)} чел.)"
+    await log_to_thread(interaction.message, event_id, log_text)
 
 async def finish_event(interaction: discord.Interaction, event_id: int):
     """Завершить мероприятие"""
@@ -308,16 +362,58 @@ async def finish_event(interaction: discord.Interaction, event_id: int):
     
     await interaction.message.edit(embed=embed, view=None)
     await interaction.response.send_message("✅ Мероприятие завершено!", ephemeral=True)
+    
+    # Логируем действие
+    log_text = f"✅ {interaction.user.mention} **завершил мероприятие**"
+    await log_to_thread(interaction.message, event_id, log_text)
+    
+    # Закрываем и архивируем ветку
+    try:
+        async with aiosqlite.connect(DATABASE_PATH) as db:
+            cursor = await db.execute(
+                'SELECT thread_id FROM events WHERE id = ?',
+                (event_id,)
+            )
+            result = await cursor.fetchone()
+        
+        if result and result[0]:
+            thread = interaction.guild.get_thread(result[0])
+            if thread:
+                await thread.send("🔒 **Мероприятие завершено. Ветка заархивирована.**")
+                await thread.edit(archived=True, locked=True)
+    except:
+        pass
 
 async def cancel_event(interaction: discord.Interaction, event_id: int):
     """Отменить мероприятие"""
+    # Логируем действие перед удалением
+    log_text = f"🗑️ {interaction.user.mention} **отменил и удалил мероприятие**"
+    await log_to_thread(interaction.message, event_id, log_text)
+    
+    # Получаем thread_id перед удалением
     async with aiosqlite.connect(DATABASE_PATH) as db:
+        cursor = await db.execute(
+            'SELECT thread_id FROM events WHERE id = ?',
+            (event_id,)
+        )
+        result = await cursor.fetchone()
+        thread_id = result[0] if result else None
+        
         await db.execute('DELETE FROM event_participants WHERE event_id = ?', (event_id,))
         await db.execute('DELETE FROM events WHERE id = ?', (event_id,))
         await db.commit()
     
     await interaction.message.delete()
     await interaction.response.send_message("🗑️ Мероприятие отменено и удалено!", ephemeral=True)
+    
+    # Удаляем ветку
+    if thread_id:
+        try:
+            thread = interaction.guild.get_thread(thread_id)
+            if thread:
+                await thread.delete()
+        except:
+            pass
 
 
 class Events(commands.Cog):
@@ -364,7 +460,8 @@ class Events(commands.Cog):
                     current_participants INTEGER DEFAULT 0,
                     priority_roles TEXT,
                     created_at TEXT NOT NULL,
-                    status TEXT DEFAULT 'active'
+                    status TEXT DEFAULT 'active',
+                    thread_id INTEGER
                 )
             ''')
             
@@ -470,7 +567,43 @@ class Events(commands.Cog):
         # Регистрируем view в боте для persistent storage
         self.bot.add_view(view)
         
+        # Отправляем сообщение
         await interaction.response.send_message(embed=embed, view=view)
+        
+        # Получаем отправленное сообщение
+        message = await interaction.original_response()
+        
+        # Создаём ветку для логов
+        try:
+            thread = await message.create_thread(
+                name=f"📋 Логи: {title}",
+                auto_archive_duration=1440  # 24 часа
+            )
+            
+            # Сохраняем ID ветки в БД
+            async with aiosqlite.connect(DATABASE_PATH) as db:
+                await db.execute(
+                    'UPDATE events SET thread_id = ? WHERE id = ?',
+                    (thread.id, event_id)
+                )
+                await db.commit()
+            
+            # Отправляем приветственное сообщение в ветку
+            welcome_msg = (
+                f"📋 **Логи мероприятия: {title}**\n\n"
+                f"Здесь будут отображаться все действия участников:\n"
+                f"✅ Записи в основной состав\n"
+                f"📋 Записи в запасной состав\n"
+                f"❌ Отмены записи\n"
+                f"📢 Упоминания участников\n\n"
+                f"Создатель: {interaction.user.mention}\n"
+                f"Время: {time}\n"
+                f"Сервер: {server}"
+            )
+            await thread.send(welcome_msg)
+            
+        except Exception as e:
+            print(f"Ошибка создания ветки: {e}")
     
     @app_commands.command(name="мои_мероприятия", description="Посмотреть свои созданные мероприятия")
     async def my_events(self, interaction: discord.Interaction):
