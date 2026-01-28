@@ -85,10 +85,19 @@ class CancelButton(discord.ui.Button):
             result = await cursor.fetchone()
             roster_type = result[0] if result else None
             
+            # Удаляем участника
             await db.execute(
                 'DELETE FROM event_participants WHERE event_id = ? AND user_id = ?',
                 (self.event_id, interaction.user.id)
             )
+            
+            # Если был в основном составе - уменьшаем счётчик
+            if roster_type == "main":
+                await db.execute(
+                    'UPDATE events SET current_participants = current_participants - 1 WHERE id = ?',
+                    (self.event_id,)
+                )
+            
             await db.commit()
         
         # Логируем действие
@@ -208,6 +217,21 @@ async def register_user(interaction: discord.Interaction, event_id: int, roster_
                 'UPDATE event_participants SET roster_type = ? WHERE event_id = ? AND user_id = ?',
                 (roster_type, event_id, interaction.user.id)
             )
+            
+            # Обновляем счётчик участников
+            if old_type == "main" and roster_type == "reserve":
+                # Ушёл из основного в запасной - уменьшаем счётчик
+                await db.execute(
+                    'UPDATE events SET current_participants = current_participants - 1 WHERE id = ?',
+                    (event_id,)
+                )
+            elif old_type == "reserve" and roster_type == "main":
+                # Перешёл из запасного в основной - увеличиваем счётчик
+                await db.execute(
+                    'UPDATE events SET current_participants = current_participants + 1 WHERE id = ?',
+                    (event_id,)
+                )
+            
             await db.commit()
             return f"✅ Вы перемещены в {'основной' if roster_type == 'main' else 'запасной'} состав!"
         
@@ -248,12 +272,22 @@ async def update_event_message(message: discord.Message, event_id: int):
             (event_id,)
         )
         participants = await cursor.fetchall()
+        
+        # Подсчитываем реальное количество участников в основном составе
+        main_count = len([p for p in participants if p[1] == "main"])
+        
+        # Обновляем счётчик в БД
+        await db.execute(
+            'UPDATE events SET current_participants = ? WHERE id = ?',
+            (main_count, event_id)
+        )
+        await db.commit()
     
     if not event:
         return
     
-    # Распаковываем данные мероприятия
-    event_id, guild_id, creator_id, title, server, color, map_name, time, max_participants, current_participants, priority_roles, created_at, status = event
+    # Распаковываем данные мероприятия (с учётом добавленного поля thread_id)
+    db_event_id, guild_id, creator_id, title, server, color, map_name, time, max_participants, current_participants, priority_roles, created_at, status, thread_id = event
     
     # Создаём embed
     embed = discord.Embed(
@@ -277,16 +311,19 @@ async def update_event_message(message: discord.Message, event_id: int):
         info += f"**• Приоритетные роли:** {priority_roles}\n"
     
     info += f"**• Время:** {time}\n"
-    # info += f"**• ID мероприятия:** {event_id}\n"
+    info += f"**• ID мероприятия:** {db_event_id}\n"
     
     embed.add_field(name="ℹ️ Информация", value=info, inline=False)
     
-    # Основной состав
+    # Основной состав - используем реальный подсчёт
     main_roster = [p for p in participants if p[1] == "main"]
     main_list = ""
     for i, (user_id, _) in enumerate(main_roster, 1):
         member = message.guild.get_member(user_id)
-        main_list += f"{i}. {member.mention if member else f'ID:{user_id}'}\n"
+        if member:
+            main_list += f"{i}. {member.mention}\n"
+        else:
+            main_list += f"{i}. <@{user_id}>\n"
     
     if not main_list:
         main_list = "*Пусто*"
@@ -302,7 +339,10 @@ async def update_event_message(message: discord.Message, event_id: int):
     reserve_list = ""
     for i, (user_id, _) in enumerate(reserve_roster, 1):
         member = message.guild.get_member(user_id)
-        reserve_list += f"{i}. {member.mention if member else f'ID:{user_id}'}\n"
+        if member:
+            reserve_list += f"{i}. {member.mention}\n"
+        else:
+            reserve_list += f"{i}. <@{user_id}>\n"
     
     if not reserve_list:
         reserve_list = "*Пусто*"
@@ -316,7 +356,7 @@ async def update_event_message(message: discord.Message, event_id: int):
     embed.set_footer(text=f"Создано: {created_at[:16]}")
     
     # Создаём view с правильным event_id
-    view = EventView(event_id)
+    view = EventView(db_event_id)
     
     await message.edit(embed=embed, view=view)
 
