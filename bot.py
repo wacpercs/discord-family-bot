@@ -51,6 +51,7 @@ async def on_command_error(ctx, error):
 async def load_extensions():
     """Загрузка всех модулей (cogs)"""
     extensions = [
+        'cogs.setup',
         'cogs.applications',
         'cogs.reports',
         'cogs.warns',
