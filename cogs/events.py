@@ -277,7 +277,7 @@ async def update_event_message(message: discord.Message, event_id: int):
         info += f"**• Приоритетные роли:** {priority_roles}\n"
     
     info += f"**• Время:** {time}\n"
-    info += f"**• ID мероприятия:** {event_id}\n"
+    # info += f"**• ID мероприятия:** {event_id}\n"
     
     embed.add_field(name="ℹ️ Информация", value=info, inline=False)
     
@@ -559,7 +559,7 @@ class Events(commands.Cog):
             inline=False
         )
         
-        embed.set_footer(text=f"Создано123: {datetime.now().strftime('%d.%m.%Y %H:%M')}")
+        embed.set_footer(text=f"Создано: {datetime.now().strftime('%d.%m.%Y %H:%M')}")
         
         # Создаём view с кнопками
         view = EventView(event_id, self.bot)
