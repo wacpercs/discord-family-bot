@@ -20,6 +20,8 @@ class Applications(commands.Cog):
     
     def __init__(self, bot):
         self.bot = bot
+        # Регистрируем persistent view при запуске
+        self.bot.add_view(ApplicationButton(self.bot))
         
     @app_commands.command(name="заявка", description="Подать заявку на вступление в семью")
     @app_commands.describe(
@@ -121,6 +123,50 @@ class Applications(commands.Cog):
         await interaction.response.send_message(
             "✅ Ваша заявка успешно отправлена на рассмотрение!\n"
             "⏰ Ожидайте ответа от администрации семьи.",
+            ephemeral=True
+        )
+    
+    @app_commands.command(name="setup_applications", description="Создать сообщение с кнопкой для подачи заявок (только админы)")
+    @app_commands.checks.has_permissions(administrator=True)
+    async def setup_applications_command(self, interaction: discord.Interaction):
+        """Создать постоянное сообщение с кнопкой для подачи заявок"""
+        
+        # Получаем настройки сервера
+        if MULTISERVER_ENABLED:
+            settings = await get_guild_settings(interaction.guild.id)
+            if not settings:
+                await interaction.response.send_message(
+                    "⚠️ Сначала настройте бота командой `/настроить`",
+                    ephemeral=True
+                )
+                return
+            family_role_name = settings['family_role_name']
+        else:
+            family_role_name = FAMILY_ROLE_NAME
+        
+        # Создаём embed
+        embed = discord.Embed(
+            title="📋 Подача заявки на вступление в семью",
+            description=(
+                "Хотите вступить в нашу семью? Нажмите кнопку ниже!\n\n"
+                "**Требования:**\n"
+                "• Минимальный возраст персонажа: 16 лет\n"
+                "• Активная игра на сервере\n"
+                "• Соблюдение правил семьи\n\n"
+                "После подачи заявки ожидайте ответа от администрации."
+            ),
+            color=discord.Color.blue()
+        )
+        
+        embed.set_footer(text=f"Роль семьи: {family_role_name}")
+        
+        # Создаём view с кнопкой
+        view = ApplicationButton(self.bot, family_role_name)
+        
+        # Отправляем сообщение
+        await interaction.channel.send(embed=embed, view=view)
+        await interaction.response.send_message(
+            "✅ Сообщение с кнопкой для подачи заявок создано!",
             ephemeral=True
         )
 
@@ -285,6 +331,155 @@ class RejectModal(discord.ui.Modal, title='Причина отклонения �
                 await member.send(embed=reject_embed)
             except discord.Forbidden:
                 pass  # У пользователя закрыты ЛС
+
+
+class ApplicationModal(discord.ui.Modal, title="Заявка на вступление в семью"):
+    """Модальное окно для подачи заявки"""
+    
+    nickname = discord.ui.TextInput(
+        label="Игровой ник",
+        placeholder="Ваш ник в GTA 5 RP",
+        required=True,
+        max_length=50
+    )
+    
+    age = discord.ui.TextInput(
+        label="Возраст персонажа",
+        placeholder="Например: 25",
+        required=True,
+        max_length=3
+    )
+    
+    experience = discord.ui.TextInput(
+        label="Опыт на сервере",
+        placeholder="Например: Играю 2 месяца",
+        required=True,
+        max_length=100
+    )
+    
+    about = discord.ui.TextInput(
+        label="О себе",
+        placeholder="Расскажите почему хотите вступить в семью",
+        required=True,
+        style=discord.TextStyle.paragraph,
+        max_length=500
+    )
+    
+    def __init__(self, bot, family_role_name: str):
+        super().__init__()
+        self.bot = bot
+        self.family_role_name = family_role_name
+    
+    async def on_submit(self, interaction: discord.Interaction):
+        # Проверка возраста
+        try:
+            age_int = int(self.age.value)
+        except ValueError:
+            await interaction.response.send_message(
+                "❌ Возраст должен быть числом!",
+                ephemeral=True
+            )
+            return
+        
+        if age_int < 16:
+            await interaction.response.send_message(
+                "❌ Минимальный возраст персонажа для вступления - 16 лет.",
+                ephemeral=True
+            )
+            return
+        
+        # Проверка, не состоит ли уже в семье
+        family_role = discord.utils.get(interaction.guild.roles, name=self.family_role_name)
+        if family_role and family_role in interaction.user.roles:
+            await interaction.response.send_message(
+                "❌ Вы уже состоите в семье!",
+                ephemeral=True
+            )
+            return
+        
+        # Получаем настройки сервера
+        if MULTISERVER_ENABLED:
+            settings = await get_guild_settings(interaction.guild.id)
+            if not settings:
+                await interaction.response.send_message(
+                    "⚠️ Бот не настроен на этом сервере!",
+                    ephemeral=True
+                )
+                return
+            applications_channel_id = settings['applications_channel_id']
+        else:
+            applications_channel_id = APPLICATIONS_CHANNEL_ID
+        
+        # Создаём embed для заявки
+        embed = discord.Embed(
+            title="📝 Новая заявка на вступление в семью",
+            color=discord.Color.blue(),
+            timestamp=datetime.now()
+        )
+        
+        embed.add_field(name="👤 Игровой ник", value=f"`{self.nickname.value}`", inline=True)
+        embed.add_field(name="🎂 Возраст персонажа", value=f"`{age_int} лет`", inline=True)
+        embed.add_field(name="📊 Опыт на сервере", value=f"`{self.experience.value}`", inline=False)
+        embed.add_field(name="💭 О себе", value=self.about.value, inline=False)
+        
+        embed.set_footer(
+            text=f"Discord: {interaction.user.name} • ID: {interaction.user.id}",
+            icon_url=interaction.user.display_avatar.url
+        )
+        embed.set_thumbnail(url=interaction.user.display_avatar.url)
+        
+        # Создаём кнопки
+        view = ApplicationView(
+            interaction.user.id,
+            self.nickname.value,
+            interaction.user.name,
+            self.family_role_name
+        )
+        
+        # Отправляем в канал заявок
+        channel = self.bot.get_channel(applications_channel_id)
+        if channel:
+            await channel.send(embed=embed, view=view)
+            await interaction.response.send_message(
+                "✅ Ваша заявка успешно отправлена!\n⏰ Ожидайте ответа от администрации.",
+                ephemeral=True
+            )
+        else:
+            await interaction.response.send_message(
+                "❌ Ошибка: канал для заявок не найден.",
+                ephemeral=True
+            )
+
+
+class ApplicationButton(discord.ui.View):
+    """Постоянная кнопка для подачи заявок"""
+    
+    def __init__(self, bot, family_role_name: str = "🏠 Семья"):
+        super().__init__(timeout=None)
+        self.bot = bot
+        self.family_role_name = family_role_name
+    
+    @discord.ui.button(
+        label="📝 Подать заявку",
+        style=discord.ButtonStyle.green,
+        custom_id="application_button",
+        emoji="📝"
+    )
+    async def application_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        # Получаем настройки сервера для определения роли
+        if MULTISERVER_ENABLED:
+            settings = await get_guild_settings(interaction.guild.id)
+            if settings:
+                family_role_name = settings['family_role_name']
+            else:
+                family_role_name = self.family_role_name
+        else:
+            family_role_name = self.family_role_name
+        
+        # Открываем модальное окно
+        modal = ApplicationModal(self.bot, family_role_name)
+        await interaction.response.send_modal(modal)
+
 
 async def setup(bot):
     await bot.add_cog(Applications(bot))
