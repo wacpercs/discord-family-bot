@@ -559,7 +559,7 @@ class Events(commands.Cog):
             inline=False
         )
         
-        embed.set_footer(text=f"Создано: {datetime.now().strftime('%d.%m.%Y %H:%M')}")
+        embed.set_footer(text=f"Создано123: {datetime.now().strftime('%d.%m.%Y %H:%M')}")
         
         # Создаём view с кнопками
         view = EventView(event_id, self.bot)
