@@ -3,7 +3,18 @@ from discord.ext import commands
 from discord import app_commands
 from datetime import datetime
 from database.db import Database
-from config import REPORTS_CHANNEL_ID
+import sys
+import os
+
+# Добавляем путь к utils в sys.path
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
+
+try:
+    from utils.guild_settings import get_guild_settings
+    MULTISERVER_ENABLED = True
+except ImportError:
+    MULTISERVER_ENABLED = False
+    from config import REPORTS_CHANNEL_ID
 
 class Reports(commands.Cog):
     """Модуль отчётов о внутриигровых мероприятиях"""
@@ -26,6 +37,21 @@ class Reports(commands.Cog):
         description: str,
         screenshot: discord.Attachment = None
     ):
+        # Получаем настройки сервера
+        if MULTISERVER_ENABLED:
+            settings = await get_guild_settings(interaction.guild.id)
+            if not settings:
+                await interaction.response.send_message(
+                    "⚠️ Бот не настроен на этом сервере!\n\n"
+                    "**Администратор должен использовать:**\n"
+                    "`/настроить` для первоначальной настройки",
+                    ephemeral=True
+                )
+                return
+            reports_channel_id = settings['reports_channel_id']
+        else:
+            reports_channel_id = REPORTS_CHANNEL_ID
+        
         # Проверка количества участников
         if participants < 1:
             await interaction.response.send_message(
@@ -88,7 +114,7 @@ class Reports(commands.Cog):
         )
         
         # Отправляем в канал отчётов
-        channel = self.bot.get_channel(REPORTS_CHANNEL_ID)
+        channel = self.bot.get_channel(reports_channel_id)
         if not channel:
             await interaction.response.send_message(
                 "❌ Ошибка: канал для отчётов не найден. Обратитесь к администратору.",
